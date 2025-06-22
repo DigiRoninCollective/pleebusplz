@@ -211,7 +211,10 @@ class TelegramBotService {
       { command: 'send', description: 'Send SOL - /send [amount] [address]' },
       { command: 'backup', description: 'Get wallet backup phrase (DM only)' },
       { command: 'import', description: 'Import wallet from seed phrase' },
-      { command: 'help', description: 'Show help information' }
+      { command: 'help', description: 'Show help information' },
+      { command: 'buy', description: 'Buy tokens - /buy' },
+      { command: 'sell', description: 'Sell tokens - /sell' },
+      { command: 'swap', description: 'Swap tokens - /swap' }
     ]);
 
     // Command handlers
@@ -224,6 +227,9 @@ class TelegramBotService {
     this.bot.onText(/\/send(?:\s+([0-9.]+)\s+(\S+))?/, (msg, match) => this.handleSend(msg, match));
     this.bot.onText(/\/backup/, (msg) => this.handleBackup(msg));
     this.bot.onText(/\/import/, (msg) => this.handleImportWallet(msg));
+    this.bot.onText(/\/buy/, (msg) => this.handleBuy(msg));
+    this.bot.onText(/\/sell/, (msg) => this.handleSell(msg));
+    this.bot.onText(/\/swap/, (msg) => this.handleSwap(msg));
   }
 
   setupEventHandlers() {
@@ -513,6 +519,9 @@ Ready to get started? 🚀
 • \`/send [amount] [address]\` - Send SOL
 • \`/backup\` - Get backup phrase (DM only)
 • \`/import\` - Import existing wallet
+• \`/buy\` - Buy tokens
+• \`/sell\` - Sell tokens
+• \`/swap\` - Swap tokens
 
 *🎫 Chat Room Access:*
 1. Hold any amount of a token
@@ -1572,6 +1581,58 @@ Your security is our top priority! 🛡️
         ]
       }
     });
+  }
+
+  // --- BUY Handler ---
+  async handleBuy(msg) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    // Step 1: Ask for token mint
+    await this.bot.sendMessage(chatId, '🪙 What token do you want to buy? Please send the token mint address or symbol.');
+    // TODO: Continue flow (token, amount, slippage, priority fee, confirm)
+  }
+
+  // --- SELL Handler ---
+  async handleSell(msg) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    // Step 1: Ask for token to sell
+    await this.bot.sendMessage(chatId, '💸 What token do you want to sell? Please send the token mint address or symbol.');
+    // TODO: Continue flow: ask amount/% to sell, slippage, priority fee, confirm
+  }
+
+  // --- SWAP Handler ---
+  async handleSwap(msg) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    // Step 1: Ask for input token
+    await this.bot.sendMessage(chatId, '🔄 What token do you want to swap from? Please send the token mint address or symbol.');
+    // TODO: Continue flow: ask output token, amount, slippage, priority fee, confirm
+  }
+
+  // --- TRADE PROGRESS & PROFIT ---
+  async showTradeProgress(chatId, tradeInfo) {
+    // tradeInfo: { type, amount, token, txid, status, buyPrice, sellPrice }
+    let message = `\n✅ *Trade Complete!*\n`;
+    message += `Type: ${tradeInfo.type}\n`;
+    message += `Token: ${tradeInfo.token}\n`;
+    message += `Amount: ${tradeInfo.amount}\n`;
+    message += `Status: ${tradeInfo.status}\n`;
+    message += `\n[View on Solscan](https://solscan.io/tx/${tradeInfo.txid})\n`;
+    if (tradeInfo.buyPrice && tradeInfo.sellPrice) {
+      const profit = ((tradeInfo.sellPrice - tradeInfo.buyPrice) / tradeInfo.buyPrice) * 100;
+      message += `\n*Profit/Loss:* ${profit.toFixed(2)}%`;
+    }
+    await this.bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+  }
+
+  async handleProfitRefresh(chatId, userId, tokenMint) {
+    // Fetch buy/sell history for this token, calculate profit %
+    // This is a placeholder; you would fetch from your DB or backend
+    const buyPrice = 1.0; // Example
+    const currentPrice = 1.2; // Example
+    const profit = ((currentPrice - buyPrice) / buyPrice) * 100;
+    await this.bot.sendMessage(chatId, `\n📈 *Profit/Loss for ${tokenMint}:* ${profit.toFixed(2)}%\n`, { parse_mode: 'Markdown' });
   }
 
   // Start the bot
