@@ -3,11 +3,16 @@ const { Pool } = require('pg');
 const http = require('http');
 const socketIo = require('socket.io');
 const TelegramBotService = require('./services/telegramBotService');
-
+const walletRoutes = require('./routes/walletRoutes');
+const fetch = require('node-fetch');
+const cors = require('cors');
+const winston = require('winston');
+require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(express.json());
+app.use('/api/wallet', walletRoutes);
 
 // Connect to your PostgreSQL DB using DATABASE_URL
 const pool = new Pool({
@@ -36,13 +41,33 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
 // Health check
 app.get('/', (req, res) => res.send('SLERRRFPAD Backend Running'));
 
+// Configure CORS for API (allow all in dev, restrict in prod)
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || '*',
+  methods: ['GET', 'POST'],
+}));
+
+// Configure Winston logger
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.printf(({ timestamp, level, message }) => `${timestamp} ${level}: ${message}`)
+  ),
+  transports: [
+    new winston.transports.Console(),
+    // Add file transport if needed
+    // new winston.transports.File({ filename: 'server.log' })
+  ],
+});
+
 // GET all tokens
 app.get('/api/tokens', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM tokens ORDER BY created_at DESC');
     res.json(rows);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch tokens' });
   }
 });
@@ -71,7 +96,7 @@ app.post('/api/tokens', async (req, res) => {
     
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to create token' });
   }
 });
@@ -89,7 +114,7 @@ app.get('/api/tokens/:contractAddress', async (req, res) => {
     
     res.json(rows[0]);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch token' });
   }
 });
@@ -110,7 +135,7 @@ app.get('/api/chat-rooms', async (req, res) => {
     `);
     res.json(rows);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch chat rooms' });
   }
 });
@@ -133,7 +158,7 @@ app.post('/api/chat-rooms', async (req, res) => {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Chat room for this contract address already exists' });
     }
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to create chat room' });
   }
 });
@@ -160,7 +185,7 @@ app.get('/api/chat-rooms/:contractAddress', async (req, res) => {
     
     res.json(rows[0]);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch chat room' });
   }
 });
@@ -179,7 +204,7 @@ app.get('/api/chat-rooms/:contractAddress/messages', async (req, res) => {
     
     res.json(rows.reverse()); // Return in chronological order
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch messages' });
   }
 });
@@ -192,7 +217,7 @@ app.get('/api/solana-price/:token', async (req, res) => {
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch price data' });
   }
 });
@@ -219,23 +244,23 @@ app.get('/api/trending', async (req, res) => {
     `);
     res.json(rows);
   } catch (err) {
-    console.error(err);
+    logger.error(err);
     res.status(500).json({ error: 'Failed to fetch trending tokens' });
   }
 });
 
 // WebSocket connection handling
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  logger.info(`User connected: ${socket.id}`);
   
   socket.on('join-room', (roomId) => {
     socket.join(roomId);
-    console.log(`User ${socket.id} joined room ${roomId}`);
+    logger.info(`User ${socket.id} joined room ${roomId}`);
   });
   
   socket.on('leave-room', (roomId) => {
     socket.leave(roomId);
-    console.log(`User ${socket.id} left room ${roomId}`);
+    logger.info(`User ${socket.id} left room ${roomId}`);
   });
   
   socket.on('chat-message', async (data) => {
@@ -253,13 +278,13 @@ io.on('connection', (socket) => {
       // telegramBot?.notifyNewMessage(data);
       
     } catch (error) {
-      console.error('Error handling chat message:', error);
+      logger.error('Error handling chat message:', error);
       socket.emit('error', { message: 'Failed to send message' });
     }
   });
   
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    logger.info(`User disconnected: ${socket.id}`);
   });
 });
 
@@ -272,7 +297,7 @@ async function saveMessage(messageData) {
     );
     return result.rows[0];
   } catch (err) {
-    console.error('Error saving message:', err);
+    logger.error('Error saving message:', err);
     throw err;
   }
 }
