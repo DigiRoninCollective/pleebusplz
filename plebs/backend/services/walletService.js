@@ -16,6 +16,7 @@ const {
 } = require('@solana/spl-token');
 const bs58 = require('bs58');
 const crypto = require('crypto');
+const axios = require('axios');
 require('dotenv').config();
 
 class WalletService {
@@ -25,6 +26,41 @@ class WalletService {
             'confirmed'
         );
         this.jupiterApiUrl = 'https://quote-api.jup.ag/v6';
+        this.platformFeeBps = parseInt(process.env.PLATFORM_FEE_BPS || '30'); // 0.3%
+        this.platformFeeAccount = process.env.PLATFORM_FEE_ACCOUNT; // SPL token account to receive fee
+    }
+
+    async getSwapRoute({ inputMint, outputMint, amount }) {
+        const url = `${this.jupiterApiUrl}/swap`; // newer endpoint supports fee
+
+        const params = {
+            inputMint,
+            outputMint,
+            amount,
+            slippageBps: 50,
+            platformFeeBps: this.platformFeeBps,
+            platformFeeAccount: this.platformFeeAccount
+        };
+
+        const { data } = await axios.get(`${this.jupiterApiUrl}/quote`, { params });
+        return data?.[0];
+    }
+
+    async buildAndSendSwapTx(userKeypair, route) {
+        const { data } = await axios.post(`${this.jupiterApiUrl}/swap`, {
+            route,
+            userPublicKey: userKeypair.publicKey.toBase58(),
+            wrapUnwrapSOL: true,
+            feeAccount: this.platformFeeAccount
+        });
+
+        const txBuf = Buffer.from(data.swapTransaction, 'base64');
+        const tx = Transaction.from(txBuf);
+        tx.partialSign(userKeypair);
+
+        const signature = await this.connection.sendRawTransaction(tx.serialize());
+        await this.connection.confirmTransaction(signature);
+        return signature;
     }
 
     /**
@@ -150,7 +186,7 @@ class WalletService {
      * @param {string} fromPrivateKey - Sender's private key
      * @param {string} toPublicKey - Recipient's public key
      * @param {number} amount - Amount in SOL
-     * @returns {Promise<Object>} Transaction result
+     * @returns {Promise<Object> Transaction result
      */
     async sendSOL(fromPrivateKey, toPublicKey, amount) {
         try {
@@ -449,39 +485,38 @@ class WalletService {
     }
 
     /**
-     * Encrypt private key for storage
+     * Encrypt private key for storage (AES-256-GCM)
      * @param {string} privateKey - Private key to encrypt
      * @param {string} password - Encryption password
-     * @returns {string} Encrypted private key
+     * @returns {string} Encrypted private key (iv:authTag:encrypted)
      */
     encryptPrivateKey(privateKey, password) {
         const algorithm = 'aes-256-gcm';
         const key = crypto.scryptSync(password, 'salt', 32);
-        const iv = crypto.randomBytes(16);
-        const cipher = crypto.createCipher(algorithm, key);
-        
+        const iv = crypto.randomBytes(12); // 12 bytes for GCM
+        const cipher = crypto.createCipheriv(algorithm, key, iv);
         let encrypted = cipher.update(privateKey, 'utf8', 'hex');
         encrypted += cipher.final('hex');
-        
-        return iv.toString('hex') + ':' + encrypted;
+        const authTag = cipher.getAuthTag();
+        return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
     }
 
     /**
-     * Decrypt private key
-     * @param {string} encryptedKey - Encrypted private key
+     * Decrypt private key (AES-256-GCM)
+     * @param {string} encryptedKey - Encrypted private key (iv:authTag:encrypted)
      * @param {string} password - Decryption password
      * @returns {string} Decrypted private key
      */
     decryptPrivateKey(encryptedKey, password) {
         const algorithm = 'aes-256-gcm';
         const key = crypto.scryptSync(password, 'salt', 32);
-        const [ivHex, encrypted] = encryptedKey.split(':');
+        const [ivHex, authTagHex, encrypted] = encryptedKey.split(':');
         const iv = Buffer.from(ivHex, 'hex');
-        const decipher = crypto.createDecipher(algorithm, key);
-        
+        const authTag = Buffer.from(authTagHex, 'hex');
+        const decipher = crypto.createDecipheriv(algorithm, key, iv);
+        decipher.setAuthTag(authTag);
         let decrypted = decipher.update(encrypted, 'hex', 'utf8');
         decrypted += decipher.final('utf8');
-        
         return decrypted;
     }
 }

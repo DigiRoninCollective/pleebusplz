@@ -817,7 +817,6 @@ You don't have a wallet yet. Choose an option:
       }
 
       const balance = await this.getWalletBalance(userWallet.public_key);
-// Continue handleBalance method
   const message = `
 💰 *Wallet Balance*
 
