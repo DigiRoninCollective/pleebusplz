@@ -10,9 +10,10 @@ const winston = require('winston');
 require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
-
+const authRoutes = require('./routes/authRoutes'); 
 app.use(express.json());
 app.use('/api/wallet', walletRoutes);
+app.use('/api/auth', authRoutes);
 
 // Connect to your PostgreSQL DB using DATABASE_URL
 const pool = new Pool({

@@ -19,6 +19,34 @@ const crypto = require('crypto');
 const axios = require('axios');
 require('dotenv').config();
 
+/**
+ * WalletService provides utility methods for interacting with the Solana blockchain,
+ * including wallet management, SOL and SPL token transfers, token swaps via Jupiter API,
+ * balance queries, transaction history, and secure private key encryption.
+ *
+ * @class
+ *
+ * @property {Connection} connection - Solana RPC connection instance.
+ * @property {string} jupiterApiUrl - Jupiter API base URL for swaps and quotes.
+ * @property {number} platformFeeBps - Platform fee in basis points for swaps.
+ * @property {string} platformFeeAccount - SPL token account to receive platform fees.
+ *
+ * @example
+ * const walletService = new WalletService();
+ *
+ * // Generate a new wallet
+ * const wallet = walletService.generateWallet();
+ *
+ * // Get SOL balance
+ * const balance = await walletService.getSOLBalance(wallet.data.publicKey);
+ *
+ * // Send SOL
+ * const tx = await walletService.sendSOL(wallet.data.privateKey, recipientPublicKey, 0.1);
+ *
+ * // Swap tokens
+ * const quote = await walletService.getSwapQuote(inputMint, outputMint, amount);
+ * const swapResult = await walletService.executeSwap(quote.data, wallet.data.publicKey, wallet.data.privateKey);
+ */
 class WalletService {
     constructor() {
         this.connection = new Connection(
@@ -226,20 +254,143 @@ class WalletService {
     }
 
     /**
+     * Send SPL Token to another wallet
+     * @param {string} fromPrivateKey - Sender's private key (base58)
+     * @param {string} toPublicKey - Recipient's public key
+     * @param {number} amount - Amount of tokens to send (in UI units)
+     * @param {string} mint - SPL token mint address
+     * @returns {Promise<Object>} Transaction result
+     */
+    async sendSPLToken(fromPrivateKey, toPublicKey, amount, mint) {
+        try {
+            const fromKeypair = Keypair.fromSecretKey(bs58.decode(fromPrivateKey));
+            const mintPubkey = new PublicKey(mint);
+            const toPubkey = new PublicKey(toPublicKey);
+
+            // Get or create associated token accounts
+            const fromTokenAccount = await getOrCreateAssociatedTokenAccount(
+                this.connection, fromKeypair, mintPubkey, fromKeypair.publicKey
+            );
+            const toTokenAccount = await getOrCreateAssociatedTokenAccount(
+                this.connection, fromKeypair, mintPubkey, toPubkey
+            );
+
+            // Get decimals for the mint
+            const mintInfo = await this.connection.getParsedAccountInfo(mintPubkey);
+            const decimals = mintInfo.value?.data?.parsed?.info?.decimals || 0;
+            const amountInSmallestUnit = Math.floor(amount * Math.pow(10, decimals));
+
+            // Create transfer instruction
+            const transferIx = createTransferInstruction(
+                fromTokenAccount.address,
+                toTokenAccount.address,
+                fromKeypair.publicKey,
+                amountInSmallestUnit,
+                [],
+                TOKEN_PROGRAM_ID
+            );
+
+            const tx = new Transaction().add(transferIx);
+            const signature = await sendAndConfirmTransaction(
+                this.connection,
+                tx,
+                [fromKeypair]
+            );
+
+            return {
+                success: true,
+                data: { signature, from: fromTokenAccount.address.toString(), to: toTokenAccount.address.toString(), amount }
+            };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * Create a new SPL Token (mint)
+     * @param {string} fromPrivateKey - Creator's private key (base58)
+     * @param {number} decimals - Number of decimals for the token
+     * @param {number} initialSupply - Initial supply (UI units)
+     * @returns {Promise<Object>} Mint info
+     */
+    async createSPLToken(fromPrivateKey, decimals, initialSupply) {
+        try {
+            const fromKeypair = Keypair.fromSecretKey(bs58.decode(fromPrivateKey));
+            const mint = await import('@solana/spl-token').then(spl =>
+                spl.createMint(
+                    this.connection,
+                    fromKeypair,
+                    fromKeypair.publicKey,
+                    null,
+                    decimals
+                )
+            );
+            // Create associated token account for creator
+            const tokenAccount = await getOrCreateAssociatedTokenAccount(
+                this.connection, fromKeypair, mint, fromKeypair.publicKey
+            );
+            // Mint initial supply to creator
+            if (initialSupply > 0) {
+                const amountInSmallestUnit = Math.floor(initialSupply * Math.pow(10, decimals));
+                await import('@solana/spl-token').then(spl =>
+                    spl.mintTo(
+                        this.connection,
+                        fromKeypair,
+                        mint,
+                        tokenAccount.address,
+                        fromKeypair.publicKey,
+                        amountInSmallestUnit
+                    )
+                );
+            }
+            return {
+                success: true,
+                data: {
+                    mint: mint.toString(),
+                    tokenAccount: tokenAccount.address.toString(),
+                    decimals,
+                    initialSupply
+                }
+            };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    }
+
+    /**
+     * Get minimum rent-exempt balance for SPL token account
+     * @param {number} decimals - Number of decimals for the token
+     * @returns {Promise<Object>} Rent-exempt balance in lamports
+     */
+    async getRentExemptBalance(decimals) {
+        try {
+            const { getMinimumBalanceForRentExemptAccount } = await import('@solana/spl-token');
+            const rent = await getMinimumBalanceForRentExemptAccount(this.connection);
+            return { success: true, data: { rent } };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    }
+
+    /**
      * Get quote for token swap using Jupiter API
      * @param {string} inputMint - Input token mint address
      * @param {string} outputMint - Output token mint address
      * @param {number} amount - Amount to swap (in token's smallest unit)
      * @param {number} slippageBps - Slippage in basis points (50 = 0.5%)
+     * @param {number} [platformFeeBps] - Platform fee in basis points (optional, default from env)
+     * @param {string} [platformFeeAccount] - Platform fee account (optional, default from env)
      * @returns {Promise<Object>} Quote information
      */
-    async getSwapQuote(inputMint, outputMint, amount, slippageBps = 50) {
+    async getSwapQuote(inputMint, outputMint, amount, slippageBps = 50, platformFeeBps, platformFeeAccount) {
         try {
             const params = new URLSearchParams({
                 inputMint,
                 outputMint,
                 amount: amount.toString(),
-                slippageBps: slippageBps.toString()
+                slippageBps: slippageBps.toString(),
+                platformFeeBps: (platformFeeBps || this.platformFeeBps).toString(),
+                platformFeeAccount: platformFeeAccount || this.platformFeeAccount
             });
 
             const response = await fetch(`${this.jupiterApiUrl}/quote?${params}`);
@@ -266,9 +417,10 @@ class WalletService {
      * @param {Object} quote - Quote from getSwapQuote
      * @param {string} userPublicKey - User's wallet public key
      * @param {string} privateKey - User's private key for signing
+     * @param {number} [prioritizationFeeLamports] - User-specified priority fee (optional)
      * @returns {Promise<Object>} Swap transaction result
      */
-    async executeSwap(quote, userPublicKey, privateKey) {
+    async executeSwap(quote, userPublicKey, privateKey, prioritizationFeeLamports = 1000) {
         try {
             // Get swap transaction from Jupiter
             const swapResponse = await fetch(`${this.jupiterApiUrl}/swap`, {
@@ -281,7 +433,7 @@ class WalletService {
                     userPublicKey,
                     wrapAndUnwrapSol: true,
                     dynamicComputeUnitLimit: true,
-                    prioritizationFeeLamports: 1000
+                    prioritizationFeeLamports: prioritizationFeeLamports || 1000
                 })
             });
 
@@ -328,21 +480,24 @@ class WalletService {
      * @param {string} userPublicKey - User's wallet
      * @param {string} privateKey - User's private key
      * @param {number} slippageBps - Slippage tolerance
+     * @param {number} [prioritizationFeeLamports] - User-specified priority fee (optional)
+     * @param {number} [platformFeeBps] - Platform fee in basis points (optional)
+     * @param {string} [platformFeeAccount] - Platform fee account (optional)
      * @returns {Promise<Object>} Purchase result
      */
-    async buyTokenWithSOL(tokenMint, solAmount, userPublicKey, privateKey, slippageBps = 100) {
+    async buyTokenWithSOL(tokenMint, solAmount, userPublicKey, privateKey, slippageBps = 100, prioritizationFeeLamports, platformFeeBps, platformFeeAccount) {
         try {
             const SOL_MINT = 'So11111111111111111111111111111111111111112'; // Wrapped SOL
             const amount = Math.floor(solAmount * LAMPORTS_PER_SOL);
 
             // Get quote
-            const quoteResult = await this.getSwapQuote(SOL_MINT, tokenMint, amount, slippageBps);
+            const quoteResult = await this.getSwapQuote(SOL_MINT, tokenMint, amount, slippageBps, platformFeeBps, platformFeeAccount);
             if (!quoteResult.success) {
                 return quoteResult;
             }
 
             // Execute swap
-            const swapResult = await this.executeSwap(quoteResult.data, userPublicKey, privateKey);
+            const swapResult = await this.executeSwap(quoteResult.data, userPublicKey, privateKey, prioritizationFeeLamports);
             
             return {
                 success: swapResult.success,
@@ -369,20 +524,23 @@ class WalletService {
      * @param {string} userPublicKey - User's wallet
      * @param {string} privateKey - User's private key
      * @param {number} slippageBps - Slippage tolerance
+     * @param {number} [prioritizationFeeLamports] - User-specified priority fee (optional)
+     * @param {number} [platformFeeBps] - Platform fee in basis points (optional)
+     * @param {string} [platformFeeAccount] - Platform fee account (optional)
      * @returns {Promise<Object>} Sale result
      */
-    async sellTokenForSOL(tokenMint, tokenAmount, userPublicKey, privateKey, slippageBps = 100) {
+    async sellTokenForSOL(tokenMint, tokenAmount, userPublicKey, privateKey, slippageBps = 100, prioritizationFeeLamports, platformFeeBps, platformFeeAccount) {
         try {
             const SOL_MINT = 'So11111111111111111111111111111111111111112';
 
             // Get quote
-            const quoteResult = await this.getSwapQuote(tokenMint, SOL_MINT, tokenAmount, slippageBps);
+            const quoteResult = await this.getSwapQuote(tokenMint, SOL_MINT, tokenAmount, slippageBps, platformFeeBps, platformFeeAccount);
             if (!quoteResult.success) {
                 return quoteResult;
             }
 
             // Execute swap
-            const swapResult = await this.executeSwap(quoteResult.data, userPublicKey, privateKey);
+            const swapResult = await this.executeSwap(quoteResult.data, userPublicKey, privateKey, prioritizationFeeLamports);
             
             return {
                 success: swapResult.success,
