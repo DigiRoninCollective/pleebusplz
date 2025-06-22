@@ -138,8 +138,15 @@ class TokenController {
   // GET /api/tokens/:mint/info - Get on-chain token info
   async getTokenInfo(req, res) {
     const { mint } = req.params;
+    const telegramId = req.user?.telegram_id || null; // If you have user info, otherwise null
 
     try {
+      // Log the search action
+      await pool.query(
+        'INSERT INTO wallet_activity_log (telegram_id, action, details) VALUES ($1, $2, $3)',
+        [telegramId, 'search_contract', { contractAddress: mint }]
+      );
+
       const tokenInfo = await solanaService.getTokenInfo(mint);
       const metadata = await metaplexService.getTokenMetadata(mint);
       
@@ -157,12 +164,19 @@ class TokenController {
   async mintTokens(req, res) {
     const { mint } = req.params;
     const { recipient, amount } = req.body;
+    const telegramId = req.user?.telegram_id || null;
 
     if (!recipient || !amount) {
       return res.status(400).json({ error: 'Recipient and amount are required' });
     }
 
     try {
+      // Log the mint action
+      await pool.query(
+        'INSERT INTO wallet_activity_log (telegram_id, action, details) VALUES ($1, $2, $3)',
+        [telegramId, 'mint_tokens', { mint, recipient, amount }]
+      );
+
       // Create or get token account for recipient
       const tokenAccount = await solanaService.getOrCreateTokenAccount(mint, recipient);
       
@@ -200,12 +214,19 @@ class TokenController {
   async transferTokens(req, res) {
     const { mint } = req.params;
     const { from, to, amount, owner } = req.body;
+    const telegramId = req.user?.telegram_id || null;
 
     if (!from || !to || !amount || !owner) {
       return res.status(400).json({ error: 'From, to, amount, and owner are required' });
     }
 
     try {
+      // Log the transfer action
+      await pool.query(
+        'INSERT INTO wallet_activity_log (telegram_id, action, details) VALUES ($1, $2, $3)',
+        [telegramId, 'transfer_tokens', { mint, from, to, amount }]
+      );
+
       const result = await solanaService.transferTokens(from, to, owner, amount);
       
       if (!result.success) {

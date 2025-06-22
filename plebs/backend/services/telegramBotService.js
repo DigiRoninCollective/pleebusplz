@@ -230,6 +230,7 @@ class TelegramBotService {
     this.bot.onText(/\/buy/, (msg) => this.handleBuy(msg));
     this.bot.onText(/\/sell/, (msg) => this.handleSell(msg));
     this.bot.onText(/\/swap/, (msg) => this.handleSwap(msg));
+    this.bot.onText(/\/comment (\S+) ([\s\S]+)/, (msg, match) => this.handleComment(msg, match));
   }
 
   setupEventHandlers() {
@@ -1659,6 +1660,62 @@ Your security is our top priority! 🛡️
     this.bot.stopPolling();
     await this.pool.end();
     console.log('✅ Bot service cleaned up successfully');
+  }
+
+  // Helper: Find contract address by token name or ticker
+  async findContractAddressByNameOrTicker(query) {
+    const client = await this.pool.connect();
+    try {
+      const res = await client.query(
+        'SELECT contract_address FROM tokens WHERE LOWER(name) = LOWER($1) OR LOWER(ticker) = LOWER($1) LIMIT 1',
+        [query.trim()]
+      );
+      return res.rows[0]?.contract_address || null;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Enhanced /comment: allow token name or ticker
+  async handleComment(msg, match) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    if (!match || !match[1] || !match[2]) {
+      await this.bot.sendMessage(chatId, 'Usage: /comment <contractAddress|tokenName|ticker> <your message>');
+      return;
+    }
+    let contractAddress = match[1];
+    const messageText = match[2].trim();
+    if (!this.validateSolanaAddress(contractAddress)) {
+      // Try to resolve by token name or ticker
+      contractAddress = await this.findContractAddressByNameOrTicker(contractAddress);
+      if (!contractAddress) {
+        await this.bot.sendMessage(chatId, '❌ Invalid contract address, token name, or ticker.');
+        return;
+      }
+    }
+    if (!messageText) {
+      await this.bot.sendMessage(chatId, '❌ Message cannot be empty.');
+      return;
+    }
+    // Get Telegram username or fallback
+    const username = msg.from.username || `tg_${userId}`;
+    try {
+      // Post to backend API
+      const res = await fetch(`${process.env.WEBSITE_URL || 'http://localhost:5000'}/api/chat-rooms/${contractAddress}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, message: messageText, source: 'telegram' })
+      });
+      if (res.ok) {
+        await this.bot.sendMessage(chatId, '✅ Comment posted to chat room!');
+      } else {
+        const err = await res.json();
+        await this.bot.sendMessage(chatId, `❌ Failed to post comment: ${err.error || 'Unknown error'}`);
+      }
+    } catch (e) {
+      await this.bot.sendMessage(chatId, '❌ Error posting comment.');
+    }
   }
 }
 
