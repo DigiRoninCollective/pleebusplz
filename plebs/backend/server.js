@@ -7,6 +7,13 @@ const walletRoutes = require('./routes/walletRoutes');
 const fetch = require('node-fetch');
 const cors = require('cors');
 const winston = require('winston');
+const multer = require('multer');
+const { NFTStorage, File } = require('nft.storage');
+const fs = require('fs');
+const path = require('path');
+const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -44,7 +51,7 @@ app.get('/', (req, res) => res.send('SLERRRFPAD Backend Running'));
 
 // Configure CORS for API (allow all in dev, restrict in prod)
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
+  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
   methods: ['GET', 'POST'],
 }));
 
@@ -62,6 +69,13 @@ const logger = winston.createLogger({
   ],
 });
 
+// Rate limiting middleware
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+});
+app.use('/api/', apiLimiter);
+
 // GET all tokens
 app.get('/api/tokens', async (req, res) => {
   try {
@@ -74,7 +88,17 @@ app.get('/api/tokens', async (req, res) => {
 });
 
 // POST new token
-app.post('/api/tokens', async (req, res) => {
+app.post('/api/tokens', [
+  body('name').isString().trim().notEmpty(),
+  body('ticker').isString().trim().notEmpty(),
+  body('description').isString().trim().notEmpty(),
+  body('image_url').isURL(),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
   const { name, ticker, description, image_url, contract_address } = req.body;
 
   if (!name || !ticker || !description || !image_url) {
@@ -249,6 +273,96 @@ app.get('/api/trending', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch trending tokens' });
   }
 });
+
+// File upload configuration
+const upload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 2 * 1024 * 1024 }, // 2MB max
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Only image files are allowed!'), false);
+    }
+    cb(null, true);
+  }
+});
+
+// Automated IPFS upload endpoint
+app.post('/api/upload-metadata', upload.single('logo'), async (req, res) => {
+  try {
+    const { name, symbol, description } = req.body;
+    if (!name || !symbol || !description || !req.file) {
+      return res.status(400).json({ error: 'name, symbol, description, and logo image are required' });
+    }
+    const client = new NFTStorage({ token: process.env.NFT_STORAGE_API_KEY });
+    // Upload logo image
+    const logoData = fs.readFileSync(req.file.path);
+    const logoFile = new File([logoData], req.file.originalname, { type: req.file.mimetype });
+    const logoCid = await client.storeBlob(logoFile);
+    const imageUrl = `https://ipfs.io/ipfs/${logoCid}`;
+    // Build metadata JSON
+    const metadata = {
+      name,
+      symbol,
+      decimals: 9,
+      image: imageUrl,
+      description,
+      extensions: {}
+    };
+    // Upload metadata JSON
+    const metadataFile = new File([JSON.stringify(metadata)], `${symbol}-metadata.json`, { type: 'application/json' });
+    const metadataCid = await client.storeBlob(metadataFile);
+    const metadataUrl = `https://ipfs.io/ipfs/${metadataCid}`;
+    // Clean up uploaded file
+    fs.unlinkSync(req.file.path);
+    res.json({ metadataUrl, imageUrl });
+  } catch (err) {
+    logger.error(err);
+    res.status(500).json({ error: 'Failed to upload metadata to IPFS' });
+  }
+});
+
+// Simple admin authentication middleware
+function adminAuth(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing or invalid authorization header' });
+  }
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, process.env.ENCRYPTION_SECRET);
+    if (!decoded.isAdmin) {
+      return res.status(403).json({ error: 'Forbidden: Admins only' });
+    }
+    req.admin = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// Admin login endpoint (for initial setup, use strong password and rotate secret regularly)
+app.post('/api/admin/login', [
+  body('username').isString().trim().notEmpty(),
+  body('password').isString().trim().notEmpty(),
+], (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  const { username, password } = req.body;
+  // Replace with your own admin credentials logic
+  if (
+    username === process.env.ADMIN_USERNAME &&
+    password === process.env.ADMIN_PASSWORD
+  ) {
+    const token = jwt.sign({ username, isAdmin: true }, process.env.ENCRYPTION_SECRET, { expiresIn: '12h' });
+    return res.json({ token });
+  }
+  return res.status(401).json({ error: 'Invalid credentials' });
+});
+
+// Example: Protect launchpad endpoint with adminAuth
+// app.post('/api/launchpad', adminAuth, (req, res) => { ... });
 
 // WebSocket connection handling
 io.on('connection', (socket) => {

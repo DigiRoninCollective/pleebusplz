@@ -1,0 +1,9 @@
+{
+  "name": "MyToken",
+  "symbol": "PLEB",
+  "decimals": 9,
+  "image": "https://ipfs.io/ipfs/<IMAGE_CID>/logo.png",
+  "description": "My custom token with a vanity mint.",
+  "extensions": {}
+  
+}
